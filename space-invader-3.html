@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Space Invader – Multi-Level (Sound + Enemy Fire)</title>
+<style>
+  body { margin:0; overflow:hidden; background:#111; }
+  canvas { display:block; margin:auto; background:#000; }
+  #scoreDisplay { 
+    position:absolute; top:10px; left:10px; color:#fff; 
+    font-family:monospace; font-size:1.2rem; z-index:10; 
+  }
+  #levelOverlay { 
+    position:absolute; top:0; left:0; width:100%; height:100%;
+    background:rgba(0,0,0,0.85); color:#0ff; font-family:monospace;
+    display:none; align-items:center; justify-content:center; flex-direction:column; 
+    z-index:20;
+  }
+  #levelOverlay button { 
+    margin-top:1rem; padding:0.8rem 2rem; font-size:1.1rem; 
+    background:#0ff; color:#000; border:none; cursor:pointer; font-weight:bold;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="800" height="600"></canvas>
+<div id="scoreDisplay">Score: 0</div>
+
+<div id="levelOverlay">
+  <div style="text-align:center">
+    <h1 id="levelTitle">Level 1</h1>
+    <p id="levelInfo">Get ready!</p>
+    <button id="nextLevelBtn">Next Level</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const overlay = document.getElementById('levelOverlay');
+  const levelTitle = document.getElementById('levelTitle');
+  const levelInfo = document.getElementById('levelInfo');
+  const nextLevelBtn = document.getElementById('nextLevelBtn');
+  const scoreDisplay = document.getElementById('scoreDisplay');
+
+  const cfg = {
+    width: 800, height: 600,
+    player: { size: 20, speed: 6 },
+    bullet: { sizeX: 4, sizeY: 12, speed: 9, color: "#0f0" },
+    enemy: { size: 22, drop: 35 },
+    enemyBullet: { sizeX: 4, sizeY: 12, speed: 1.7, color: "#f33" }
+  };
+
+  const levels = [
+    { rows:5, cols:10, armoredRows:2, enemySpeed:1.1, points:{armored:25, regular:15} },
+    { rows:5, cols:12, armoredRows:2, enemySpeed:1.3, points:{armored:30, regular:15} },
+    { rows:6, cols:13, armoredRows:3, enemySpeed:1.5, points:{armored:35, regular:20} },
+    { rows:7, cols:14, armoredRows:3, enemySpeed:1.7, points:{armored:40, regular:25} },
+    { rows:7, cols:14, armoredRows:3, enemySpeed:2.0, points:{armored:45, regular:30}, drop: 45 }
+  ];
+
+  let currentLevel = 0;
+  let enemies = [];
+  let bullets = [];        
+  let enemyBullets = [];   
+  let playerX = cfg.width / 2 - cfg.player.size / 2;
+  let enemyDirection = 1;
+  let gameRunning = true;
+  let score = 0;
+  let lastShot = 0;
+  let lastEnemyShot = 0;
+  let isGameOver = false;
+
+  let audioCtx;
+  function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+
+  function playHitSound() {
+    if (!audioCtx) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    const noise = audioCtx.createBufferSource();
+    const noiseGain = audioCtx.createGain();
+
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(800, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(150, audioCtx.currentTime + 0.25);
+
+    gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+
+    const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.2, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+    noise.buffer = buffer;
+    noiseGain.gain.value = 0.15;
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    noise.connect(noiseGain); noiseGain.connect(audioCtx.destination);
+
+    osc.start(); noise.start();
+    osc.stop(audioCtx.currentTime + 0.3);
+    noise.stop(audioCtx.currentTime + 0.2);
+  }
+
+  function resetGame() {
+    currentLevel = 0;
+    score = 0;
+    scoreDisplay.textContent = `Score: ${score}`;
+    bullets = [];
+    enemyBullets = [];
+    enemyDirection = 1;
+    isGameOver = false;
+  }
+
+  function initEnemies() {
+    enemies = [];
+    const lvl = levels[currentLevel];
+    const size = cfg.enemy.size;
+    const pad = 12;
+    let y = 50;
+
+    // Regular + Armored invaders
+    for (let r = 0; r < lvl.rows; r++) {
+      for (let c = 0; c < lvl.cols; c++) {
+        const x = (cfg.width - (lvl.cols * (size + pad))) / 2 + c * (size + pad);
+        const type = (r < lvl.armoredRows) ? 'armored' : 'regular';
+        enemies.push({x, y, type, width: size, height: size, alive: true});
+      }
+      y += size + pad;
+    }
+
+    // Purple invaders (from level 1)
+    if (currentLevel >= 1) {
+      const purpleCount = Math.min(8 + currentLevel * 3, 14);
+      const totalW = purpleCount * (size + 12);
+      const startX = (cfg.width - totalW) / 2;
+      for (let i = 0; i < purpleCount; i++) {
+        enemies.push({
+          x: startX + i * (size + 12),
+          y: y + 10,
+          type: 'purple',
+          width: size,
+          height: size,
+          alive: true
+        });
+      }
+      y += size + 25;
+    }
+
+    // Diamond-shaped Blue Bonus Invaders (Stage 1 only) - 5 centered above top row
+    if (currentLevel === 0) {
+      const diamondCount = 5;
+      const spacing = 32;         // gap between diamonds
+      const totalWidth = (diamondCount * size) + ((diamondCount - 1) * spacing);
+      let startX = (cfg.width - totalWidth) / 2;
+      
+      for (let i = 0; i < diamondCount; i++) {
+        enemies.push({
+          x: startX,
+          y: -28,               // Separated from second invader row
+          type: 'blue',
+          width: size,
+          height: size,
+          alive: true
+        });
+        startX += cfg.enemy.size + spacing;
+      }
+    }
+
+    // Blue Shooter (from Level 2 onwards) - Only this one shoots
+    if (currentLevel >= 1) {
+      const blueX = cfg.width / 2 - size / 2;
+      enemies.push({
+        x: blueX,
+        y: 30,                    // Positioned higher
+        type: 'blue',
+        width: size,
+        height: size,
+        alive: true
+      });
+    }
+  }
+
+  function shootFromEnemy() {
+    // Only the blue invader shoots from level 2+
+    const blue = enemies.find(e => e.alive && e.type === 'blue');
+    if (!blue) return;
+
+    enemyBullets.push({
+      x: blue.x + blue.width / 2 - cfg.enemyBullet.sizeX / 2,
+      y: blue.y + blue.height,
+      w: cfg.enemyBullet.sizeX,
+      h: cfg.enemyBullet.sizeY
+    });
+  }
+
+  function showOverlay(title, info, btnText, gameOver = false) {
+    isGameOver = gameOver;
+    levelTitle.textContent = title;
+    levelInfo.textContent = info;
+    nextLevelBtn.textContent = btnText;
+    overlay.style.display = 'flex';
+    gameRunning = false;
+  }
+
+  function drawEnemy(e) {
+    if (!e.alive) return;
+    const sz = cfg.enemy.size;
+
+    if (e.type === 'armored') {
+      ctx.fillStyle = "#ffd700";
+      ctx.fillRect(e.x, e.y, sz, sz);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(e.x + 6, e.y + 4, 12, 8); // cockpit
+    } else if (e.type === 'regular') {
+      ctx.fillStyle = "#ff3333";
+      ctx.fillRect(e.x, e.y, sz, sz);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(e.x + 6, e.y + 4, 12, 8); // cockpit
+    } else if (e.type === 'purple') {
+      ctx.fillStyle = "#a0a0ff";
+      ctx.fillRect(e.x, e.y, sz, sz);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(e.x + 6, e.y + 4, 12, 8); // cockpit
+    } else if (e.type === 'blue') {
+      // Diamond shape for all blue invaders (top row in level 1)
+      const cx = e.x + sz / 2;
+      const cy = e.y + sz / 2;
+      ctx.fillStyle = "#4488ff";
+      
+      // Draw diamond using rotate/translate
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(Math.PI / 4);
+      ctx.fillRect(-sz/2, -sz/2, sz, sz);
+      ctx.restore();
+      
+      // Diamond cockpit (small square rotated accordingly)
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(Math.PI / 4);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(-3.5, -3.5, 7, 7);
+      ctx.restore();
+    }
+  }
+
+  function drawPlayer() {
+    ctx.fillStyle = "#00ff00";
+    ctx.fillRect(playerX, cfg.height - 45, cfg.player.size, cfg.player.size);
+    ctx.fillStyle = "#00cc00";
+    ctx.fillRect(playerX + 5, cfg.height - 55, cfg.player.size - 10, 15);
+  }
+
+  function drawBullets() {
+    ctx.fillStyle = cfg.bullet.color;
+    for (let b of bullets) ctx.fillRect(b.x, b.y, b.w, b.h);
+  }
+
+  function drawEnemyBullets() {
+    ctx.fillStyle = cfg.enemyBullet.color;
+    for (let b of enemyBullets) ctx.fillRect(b.x, b.y, b.w, b.h);
+  }
+
+  function draw() {
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, cfg.width, cfg.height);
+    drawPlayer();
+    enemies.forEach(drawEnemy);
+    drawBullets();
+    drawEnemyBullets();
+  }
+
+  function update() {
+    if (!gameRunning) return;
+
+    // Player movement
+    if (keys['ArrowLeft'] || keys['a'] || keys['A']) playerX -= cfg.player.speed;
+    if (keys['ArrowRight'] || keys['d'] || keys['D']) playerX += cfg.player.speed;
+    playerX = Math.max(0, Math.min(playerX, cfg.width - cfg.player.size));
+
+    // Player shooting
+    if (keys[' '] && Date.now() - lastShot > 180) {
+      bullets.push({
+        x: playerX + cfg.player.size / 2 - cfg.bullet.sizeX / 2,
+        y: cfg.height - 55,
+        w: cfg.bullet.sizeX,
+        h: cfg.bullet.sizeY
+      });
+      lastShot = Date.now();
+    }
+
+    // Move player bullets
+    for (let i = bullets.length - 1; i >= 0; i--) {
+      bullets[i].y -= cfg.bullet.speed;
+      if (bullets[i].y < 0) bullets.splice(i, 1);
+    }
+
+    // Enemy shooting - Only Blue shoots, faster rate
+    const shootInterval = Math.max(600, 1100 - currentLevel * 80);
+    if (Date.now() - lastEnemyShot > shootInterval) {
+      shootFromEnemy();
+      lastEnemyShot = Date.now();
+    }
+
+    // Move enemy bullets
+    for (let i = enemyBullets.length - 1; i >= 0; i--) {
+      enemyBullets[i].y += cfg.enemyBullet.speed;
+      if (enemyBullets[i].y > cfg.height) enemyBullets.splice(i, 1);
+    }
+
+    // Enemy movement
+    const lvl = levels[currentLevel];
+    let shouldDrop = false;
+    for (let e of enemies) {
+      if (!e.alive) continue;
+      e.x += lvl.enemySpeed * enemyDirection;
+      if (e.x <= 0 || e.x + cfg.enemy.size >= cfg.width) shouldDrop = true;
+    }
+
+    if (shouldDrop) {
+      enemyDirection *= -1;
+      const dropAmount = lvl.drop !== undefined ? lvl.drop : cfg.enemy.drop;
+      for (let e of enemies) if (e.alive) e.y += Math.min(dropAmount, 60);
+    }
+
+    // Player bullets vs Enemies
+    for (let i = bullets.length - 1; i >= 0; i--) {
+      const b = bullets[i];
+      for (let j = enemies.length - 1; j >= 0; j--) {
+        const e = enemies[j];
+        if (!e.alive) continue;
+
+        if (b.x < e.x + e.width && b.x + b.w > e.x &&
+            b.y < e.y + e.height && b.y + b.h > e.y) {
+
+          e.alive = false;
+          bullets.splice(i, 1);
+          playHitSound();
+
+          const pts = e.type === 'armored' ? lvl.points.armored :
+                     (e.type === 'purple' ? 50 : 
+                      e.type === 'blue' ? 60 : lvl.points.regular);
+          score += pts;
+          scoreDisplay.textContent = `Score: ${score}`;
+          break;
+        }
+      }
+    }
+
+    // Enemy bullets vs Player
+    for (let i = enemyBullets.length - 1; i >= 0; i--) {
+      const eb = enemyBullets[i];
+      if (eb.x < playerX + cfg.player.size && eb.x + eb.w > playerX &&
+          eb.y < cfg.height - 45 + cfg.player.size && eb.y + eb.h > cfg.height - 55) {
+        
+        showOverlay("GAME OVER", `Final Score: ${score}`, "Restart Game", true);
+        enemyBullets = [];
+        return;
+      }
+    }
+
+    // Win condition
+    if (enemies.every(e => !e.alive)) {
+      currentLevel++;
+      if (currentLevel >= levels.length) {
+        showOverlay("YOU WIN THE GAME!", `Final Score: ${score}`, "Play Again");
+      } else {
+        showOverlay(`Level ${currentLevel + 1}`, "Well done! Get ready for the next wave...", "Next Level");
+      }
+      return;
+    }
+
+    // Lose condition
+    for (const e of enemies) {
+      if (e.alive && e.y + e.height >= cfg.height - 60) {
+        showOverlay("GAME OVER", `Final Score: ${score}`, "Restart Game", true);
+        return;
+      }
+    }
+  }
+
+  function gameLoop() {
+    update();
+    draw();
+  }
+
+  const keys = {};
+  window.addEventListener('keydown', e => {
+    keys[e.key] = true;
+    if ((e.key === 'Enter' || e.key === 'Return') && !gameRunning) {
+      overlay.style.display = 'none';
+      if (isGameOver) resetGame();
+      gameRunning = true;
+      initEnemies();
+    }
+  });
+  window.addEventListener('keyup', e => keys[e.key] = false);
+
+  nextLevelBtn.addEventListener('click', () => {
+    overlay.style.display = 'none';
+    if (isGameOver) resetGame();
+    gameRunning = true;
+    initEnemies();
+  });
+
+  // Start game
+  initAudio();
+  resetGame();
+  initEnemies();
+  setInterval(gameLoop, 1000/60);
+
+})();
+</script>
+</body>
+</html>
